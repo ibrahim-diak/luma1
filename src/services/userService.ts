@@ -1,79 +1,130 @@
-/**
- * Nom : userService.ts
- * Chemin : src/services/userService.ts
- * Rôle : profils utilisateurs Firestore (users/{userId}) et recherche d'utilisateurs.
- */
-import {
-  doc,
-  getDoc,
-  getDocs,
-  limit,
-  orderBy,
-  query,
+import { db } from "../lib/firebase";
+import { 
+  doc, 
+  getDoc, 
+  setDoc, 
   serverTimestamp,
-  setDoc,
-  startAt,
-  endAt,
   collection,
+  getDocs,
+  query,
+  orderBy
 } from "firebase/firestore";
-import { db } from "@/firebase/config";
+import { User } from "firebase/auth";
 
-export interface LumaUser {
-  uid: string;
-  email: string;
-  displayName: string;
-  photoURL?: string;
-  bio?: string;
-  searchName?: string;
+export interface UserLocation {
+  pays: string;
+  ville: string;
+  region: string;
+  ip: string;
 }
 
-const usersCol = () => collection(db(), "users");
-
-export async function upsertUserProfile(user: {
-  uid: string;
+export interface UserProfileData {
+  prenom?: string;
+  nom?: string;
   email: string;
-  displayName: string;
-  photoURL?: string;
-  bio?: string;
-}): Promise<void> {
+  photo?: string;
+  sexe?: string;
+  numero?: string;
+  localisation?: UserLocation;
+}
+
+// Récupération de la localisation de l'utilisateur
+export async function getUserLocation(): Promise<UserLocation> {
+  try {
+    const response = await fetch("https://ipapi.co/json/");
+    const data = await response.json();
+    return {
+      pays: data.country_name || "Inconnu",
+      ville: data.city || "Inconnue",
+      region: data.region || "Inconnue",
+      ip: data.ip || "Inconnue"
+    };
+  } catch (error) {
+    console.error("Erreur localisation :", error);
+    return { pays: "Inconnu", ville: "Inconnue", region: "Inconnue", ip: "Inconnu" };
+  }
+}
+
+// Synchronisation du profil public pour la recherche de contacts
+export async function synchroniserProfilPublic(user: User, profileData: Partial<UserProfileData>) {
+  if (!user || !user.email) return;
+
+  const publicProfileRef = doc(db, "public_profiles", user.email);
+  const displayName = user.displayName || "";
+  const partiesNom = displayName.trim().split(/\s+/);
+  const prenom = partiesNom[0] || "";
+  const nom = partiesNom.slice(1).join(" ");
+
   await setDoc(
-    doc(db(), "users", user.uid),
+    publicProfileRef,
     {
-      uid: user.uid,
-      email: user.email,
-      displayName: user.displayName,
-      searchName: user.displayName.toLowerCase(),
-      photoURL: user.photoURL ?? "",
-      ...(user.bio !== undefined ? { bio: user.bio } : {}),
-      updatedAt: serverTimestamp(),
+      prenom: prenom,
+      nom: nom,
+      sexe: profileData.sexe || "",
+      ville: profileData.localisation?.ville || "",
+      region: profileData.localisation?.region || "",
+      pays: profileData.localisation?.pays || "",
+      photo: user.photoURL || profileData.photo || "",
+      telephone: profileData.numero || "",
+      updatedAt: serverTimestamp()
     },
-    { merge: true },
+    { merge: true }
   );
 }
 
-export async function getUserProfile(uid: string): Promise<LumaUser | null> {
-  const snap = await getDoc(doc(db(), "users", uid));
-  return snap.exists() ? (snap.data() as LumaUser) : null;
-}
+// Enregistrement et mise à jour lors de la connexion
+export async function handleUserLogin(user: User) {
+  if (!user.email) return;
 
-/** Recherche par préfixe de nom ou par e-mail exact. */
-export async function searchUsers(term: string, currentUid: string): Promise<LumaUser[]> {
-  const t = term.trim().toLowerCase();
-  if (!t) return [];
-  const results = new Map<string, LumaUser>();
+  const loc = await getUserLocation();
+  const userRef = doc(db, "utilisateurs", user.email);
+  const snap = await getDoc(userRef);
 
-  const byName = await getDocs(
-    query(usersCol(), orderBy("searchName"), startAt(t), endAt(`${t}\uf8ff`), limit(10)),
-  );
-  byName.forEach((d) => results.set(d.id, d.data() as LumaUser));
+  let nombreConnexions = 1;
+  let badge = "Nouveau";
+  let numero = "";
+  let sexe = "";
 
-  if (t.includes("@")) {
-    const byEmail = await getDocs(
-      query(usersCol(), orderBy("email"), startAt(t), endAt(`${t}\uf8ff`), limit(10)),
-    );
-    byEmail.forEach((d) => results.set(d.id, d.data() as LumaUser));
+  if (snap.exists()) {
+    const d = snap.data();
+    nombreConnexions = (d.nombreConnexions || 0) + 1;
+    numero = d.numero || "";
+    sexe = d.sexe || "";
+
+    if (nombreConnexions >= 50) badge = "Contributeur";
+    else if (nombreConnexions >= 10) badge = "Fidèle";
+    else badge = d.badge || "Nouveau";
   }
 
-  results.delete(currentUid);
-  return [...results.values()];
+  await setDoc(
+    userRef,
+    {
+      nom: user.displayName || "",
+      email: user.email,
+      photo: user.photoURL || "",
+      derniereConnexion: serverTimestamp(),
+      localisation: loc,
+      nombreConnexions,
+      badge,
+      numero,
+      sexe
+    },
+    { merge: true }
+  );
+
+  if (numero && sexe) {
+    await synchroniserProfilPublic(user, { numero, sexe, localisation: loc });
+  }
+
+  return { isComplete: Boolean(numero && sexe), numero, sexe };
+}
+
+// Récupérer la liste des profils publics (contacts disponibles pour tchatter)
+export async function getPublicProfiles() {
+  const q = query(collection(db, "public_profiles"), orderBy("updatedAt", "desc"));
+  const querySnapshot = await getDocs(q);
+  return querySnapshot.docs.map(doc => ({
+    email: doc.id,
+    ...doc.data()
+  }));
 }
