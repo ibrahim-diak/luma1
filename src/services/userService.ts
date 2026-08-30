@@ -1,3 +1,53 @@
+import { doc, getDoc, setDoc, collection, getDocs } from "firebase/firestore";
+import { db } from "../lib/firebase";
+
+// Récupérer tous les profils publics
+export async function getPublicProfiles() {
+  try {
+    const querySnapshot = await getDocs(collection(db, "public_profiles"));
+    const profiles: any[] = [];
+    querySnapshot.forEach((doc) => {
+      profiles.push({ id: doc.id, ...doc.data() });
+    });
+    return profiles;
+  } catch (error) {
+    console.error("Erreur getPublicProfiles :", error);
+    return [];
+  }
+}
+
+// Enregistrer la connexion d'un utilisateur
+export async function handleUserLogin(user: any) {
+  if (!user || !user.email) return;
+
+  const userRef = doc(db, "utilisateurs", user.email);
+  const userSnap = await getDoc(userRef);
+
+  let loginCount = 1;
+  if (userSnap.exists()) {
+    loginCount = (userSnap.data().loginCount || 0) + 1;
+  }
+
+  const userData = {
+    email: user.email,
+    displayName: user.displayName || "",
+    photoURL: user.photoURL || "",
+    lastLogin: new Date().toISOString(),
+    loginCount: loginCount,
+  };
+
+  await setDoc(userRef, userData, { merge: true });
+
+  // Mise à jour du profil public
+  const publicRef = doc(db, "public_profiles", user.email);
+  await setDoc(publicRef, {
+    email: user.email,
+    nom: user.displayName || user.email.split("@")[0],
+    photo: user.photoURL || "",
+    updatedAt: new Date().toISOString(),
+  }, { merge: true });
+}
+
 // Récupérer le profil d'un utilisateur
 export async function getUserProfile(userId: string) {
   try {
@@ -24,7 +74,6 @@ export async function upsertUserProfile(user: any, additionalData: any = {}) {
 
   await setDoc(userRef, data, { merge: true });
 
-  // Mettre aussi à jour le profil public pour la recherche du chat
   const publicRef = doc(db, "public_profiles", user.email);
   await setDoc(publicRef, {
     email: user.email,
